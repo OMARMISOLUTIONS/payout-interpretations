@@ -1,0 +1,89 @@
+name: Commit report (privé)
+
+on:
+  schedule:
+    - cron: "7 6-20/2 * * 1-5"   # toutes les 2 h, 6h–20h UTC, du lundi au vendredi ; "7 * * * *" = chaque heure
+  workflow_dispatch:
+    inputs:
+      backfill:
+        description: "Reprise de l'historique : un rapport par jour ou par commit (off = passage normal)"
+        type: choice
+        options: [off, per-day, per-commit]
+        default: "off"
+      repo:
+        description: "Backfill — dépôt à reprendre (owner/repo ou nom seul)"
+        required: false
+        default: "PAYOUT-fr/payoutUI"
+      branch:
+        description: "Backfill — branche"
+        required: false
+        default: "main"
+      since:
+        description: "Backfill — profondeur : all, 30d, ou date YYYY-MM-DD"
+        required: false
+        default: "all"
+      slack:
+        description: "Poster sur Slack (décocher = seulement l'artefact Markdown)"
+        type: boolean
+        default: true
+      model:
+        description: "Modèle"
+        type: choice
+        options: [claude-sonnet-5, claude-fable-5, claude-haiku-4-5]
+        default: claude-sonnet-5
+
+permissions:
+  contents: write            # pour enregistrer state/last-seen.json dans CE dépôt
+
+concurrency:
+  group: commit-report
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOS: "PAYOUT-fr/payoutWebsite"   # TEST : un seul dépôt. Vider ("") pour surveiller tous les dépôts visibles par les tokens
+  SOURCE_OWNERS: ""          # vide = tous les dépôts visibles par les tokens ; sinon ex. "PAYOUT-fr,OMARMISOLUTIONS"
+  SOURCE_EXCLUDE: ""         # ex. "PAYOUT-fr/archives,PAYOUT-fr/sandbox"
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet --require-hashes -r requirements.txt   # versions et empreintes figées
+
+      - name: Générer le(s) rapport(s) et poster sur Slack
+        env:
+          SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN }}       # token lecture seule, 1 par organisation/compte
+          SOURCE_TOKEN_2: ${{ secrets.SOURCE_TOKEN_2 }}   # optionnel (2e organisation)
+          SOURCE_TOKEN_3: ${{ secrets.SOURCE_TOKEN_3 }}   # optionnel
+          ANTHROPIC_API_KEY: ${{ secrets.INTERPRETATION_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          REPORT_MODEL: ${{ inputs.model || 'claude-sonnet-5' }}
+          BACKFILL: ${{ inputs.backfill || 'off' }}
+          REPO_INPUT: ${{ inputs.repo }}
+          BRANCH_INPUT: ${{ inputs.branch }}
+          SINCE: ${{ inputs.since }}
+          POST_SLACK: ${{ inputs.slack == false && 'false' || 'true' }}
+        run: python .github/scripts/commit_report.py
+
+      - name: Enregistrer l'état
+        if: always()
+        run: |
+          git config user.name "commit-report"
+          git config user.email "commit-report@users.noreply.github.com"
+          git add state/last-seen.json 2>/dev/null || true
+          git diff --cached --quiet || (git commit -qm "state: $(date -u +%Y-%m-%dT%H:%MZ)" && git push)
+
+      - name: Artefact Markdown (tous les rapports du run)
+        if: always() && hashFiles('reports/*.md') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: commit-reports-${{ github.run_id }}
+          path: reports/*.md
+          retention-days: 90
