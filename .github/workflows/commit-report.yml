@@ -8,7 +8,7 @@ on:
       backfill:
         description: "Reprise de l'historique : un rapport par jour ou par commit (off = passage normal)"
         type: choice
-        options: [off, per-day, per-commit]
+        options: ["off", per-day, per-commit]
         default: "off"
       repo:
         description: "Backfill — dépôt à reprendre (owner/repo ou nom seul)"
