@@ -226,12 +226,21 @@ def build_prompt(src: Source, branch: str, label: str, commits: list[dict], stat
     return "\n".join(lines)
 
 
-def summarize(prompt: str) -> str:
+def system_for(src: Source) -> str:
+    """Prompt système par dépôt : prompts/<owner>__<repo>.md, sinon prompts/default.md, sinon l'intégré."""
+    for p in (f"prompts/{src.full_name.replace('/', '__')}.md", "prompts/default.md"):
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                return f.read()
+    return SYSTEM
+
+
+def summarize(prompt: str, system: str) -> str:
     if DRY_RUN:
         return "*Résumé opérationnel*\n• (dry run — aucun appel au modèle)"
     import anthropic  # importé ici pour que DRY_RUN fonctionne sans SDK
     client = anthropic.Anthropic()
-    msg = client.messages.create(model=MODEL, max_tokens=1800, system=SYSTEM,
+    msg = client.messages.create(model=MODEL, max_tokens=2000, system=system,
                                  messages=[{"role": "user", "content": prompt}])
     return "".join(getattr(b, "text", "") for b in msg.content).strip()
 
@@ -272,13 +281,26 @@ def slack_payload(src: Source, branch: str, label: str, commits: list[dict], rep
     return {"text": f"{header} — rapport de commits", "blocks": blocks[:50]}
 
 
-def post_slack(payload: dict) -> None:
+def webhooks_for(src: Source) -> list[str]:
+    """Canal par dépôt : SLACK_WEBHOOK_URL__<OWNER_REPO en majuscules, tout caractère hors A-Z0-9 → _>,
+    sinon SLACK_WEBHOOK_URL (défaut). Chaque valeur accepte plusieurs URLs séparées par des virgules."""
+    key = "SLACK_WEBHOOK_URL__" + re.sub(r"[^A-Z0-9]", "_", src.full_name.upper())
+    raw = os.environ.get(key) or os.environ.get("SLACK_WEBHOOK_URL", "")
+    return [u.strip() for u in raw.split(",") if u.strip()]
+
+
+def post_slack(src: Source, payload: dict) -> None:
     if DRY_RUN or not POST_SLACK:
         return
+    urls = webhooks_for(src)
+    if not urls:
+        print(f"::warning::[{src.full_name}] aucun webhook Slack configuré, rapport non posté (Markdown conservé)")
+        return
     import requests
-    r = requests.post(os.environ["SLACK_WEBHOOK_URL"], json=payload, timeout=30)
-    if r.status_code != 200:
-        raise RuntimeError(f"Slack {r.status_code} : {r.text[:300]}")
+    for url in urls:
+        r = requests.post(url, json=payload, timeout=30)
+        if r.status_code != 200:
+            raise RuntimeError(f"Slack {r.status_code} : {r.text[:300]}")
     time.sleep(SLACK_PAUSE)
 
 
@@ -342,8 +364,8 @@ def run_one(src: Source, branch: str, label: str, commits: list[dict], md: Markd
     prompt = build_prompt(src, branch, label, commits, stat, diff, truncated)
     if DRY_RUN:
         print("=== PROMPT ===\n" + prompt[:800] + ("\n[...]" if len(prompt) > 800 else ""))
-    report = summarize(prompt)
-    post_slack(slack_payload(src, branch, label, commits, report, len(diff), truncated, retro))
+    report = summarize(prompt, system_for(src))
+    post_slack(src, slack_payload(src, branch, label, commits, report, len(diff), truncated, retro))
     md.add(src, branch, label, commits, report)
     print(f"Rapport : {src.full_name} · {branch} · {label} — {len(commits)} commit(s), diff {len(diff)} caractères.")
 

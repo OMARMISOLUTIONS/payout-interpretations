@@ -40,7 +40,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE_REPOS: "PAYOUT-fr/payoutWebsite"   # TEST : un seul dépôt. Vider ("") pour surveiller tous les dépôts visibles par les tokens
+  SOURCE_REPOS: "PAYOUT-fr/payoutWebsite,PAYOUT-fr/payoutUI"   # dépôts surveillés. Vider ("") = tous les dépôts visibles par les tokens
   SOURCE_OWNERS: ""          # vide = tous les dépôts visibles par les tokens ; sinon ex. "PAYOUT-fr,OMARMISOLUTIONS"
   SOURCE_EXCLUDE: ""         # ex. "PAYOUT-fr/archives,PAYOUT-fr/sandbox"
 
@@ -63,13 +63,16 @@ jobs:
           SOURCE_TOKEN_2: ${{ secrets.SOURCE_TOKEN_2 }}   # optionnel (2e organisation)
           SOURCE_TOKEN_3: ${{ secrets.SOURCE_TOKEN_3 }}   # optionnel
           ANTHROPIC_API_KEY: ${{ secrets.INTERPRETATION_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}   # canal par défaut ; URLs multiples séparées par des virgules
+          # Canal par dépôt (optionnel) — clé : SLACK_WEBHOOK_URL__<OWNER_REPO en MAJUSCULES, tout sauf A-Z et 0-9 remplacé par _> :
+          SLACK_WEBHOOK_URL__PAYOUT_FR_PAYOUTUI: ${{ secrets.WEBHOOK_URL_PAYOUTUI }}   # canal dédié payoutUI
+          # SLACK_WEBHOOK_URL__OMARMISOLUTIONS_PAYOUTWEBSITE: ${{ secrets.WEBHOOK_URL_PAYOUTWEBSITE }}
           REPORT_MODEL: ${{ inputs.model || 'claude-sonnet-5' }}
           BACKFILL: ${{ inputs.backfill || 'off' }}
           REPO_INPUT: ${{ inputs.repo }}
           BRANCH_INPUT: ${{ inputs.branch }}
           SINCE: ${{ inputs.since }}
-          POST_SLACK: ${{ inputs.slack == false && 'false' || 'true' }}
+          POST_SLACK: ${{ (github.event_name == 'schedule' || inputs.slack == true) && 'true' || 'false' }}
         run: python .github/scripts/commit_report.py
 
       - name: Enregistrer l'état
