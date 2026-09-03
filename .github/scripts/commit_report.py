@@ -239,23 +239,43 @@ def threshold(since: str) -> datetime | None:
     return datetime.fromisoformat(since).replace(tzinfo=timezone.utc)
 
 
+def dates_atterrissage(src: Source, head: str, commits: list[dict]) -> dict[str, str]:
+    """sha → date à laquelle le commit est ENTRÉ dans la branche. Parcours first-parent de la branche : un commit
+    ordinaire atterrit à sa date de committer ; les commits apportés par un merge (PR) atterrissent à la date du
+    merge — c'est ce que voit quelqu'un qui suit la branche, et ce que `--no-merges` seul fait rater."""
+    par_sha = {c["sha"]: c for c in commits}
+    land: dict[str, str] = {}
+    for ligne in src.git("rev-list", "--first-parent", "--parents", head).splitlines():
+        sha, *parents = ligne.split()
+        if len(parents) >= 2:  # merge : ce qui n'était pas encore sur la branche atterrit à la date du merge
+            date_merge = src.git("show", "-s", "--format=%cI", sha).strip()
+            for m in src.git("rev-list", "--no-merges", f"{parents[0]}..{sha}").split():
+                land.setdefault(m, date_merge)
+        elif sha in par_sha:
+            land.setdefault(sha, par_sha[sha]["ciso"])
+    return land
+
+
 def commits_since(src: Source, head: str, since: str) -> list[dict]:
-    """Commits joignables depuis head ATTERRIS dans la période (date de committer ≥ borne, et < borne haute si
-    since = "A..B"), du plus ancien au plus récent. Date de committer et non d'auteur : un commit rebasé ou mergé
-    garde une date d'auteur ancienne. Filtré en Python : `git --since` coupe le parcours au premier commit trop
-    vieux. En cas de résultat vide, le log explique pourquoi."""
+    """Commits joignables depuis head ATTERRIS dans la période (voir dates_atterrissage ; borne haute si since = "A..B"),
+    du plus ancien au plus récent. Filtré en Python : `git --since` coupe le parcours au premier commit trop vieux.
+    En cas de résultat vide, le log explique pourquoi."""
     commits = parse_log(src.git("log", "--no-merges", f"--format={LOG_FMT}", "--date=iso-strict", head))
+    land = dates_atterrissage(src, head, commits)
+    for c in commits:
+        c["land"] = land.get(c["sha"], c["ciso"])
+        c["cday"] = c["land"][:10]
     bas, _, haut = (since or "").partition("..")
     limit, plafond = threshold(bas), (threshold(haut) if haut else None)
     retenus = [c for c in commits
-               if (limit is None or datetime.fromisoformat(c["ciso"]) >= limit)
-               and (plafond is None or datetime.fromisoformat(c["ciso"]) < plafond)]
+               if (limit is None or datetime.fromisoformat(c["land"]) >= limit)
+               and (plafond is None or datetime.fromisoformat(c["land"]) < plafond)]
     if commits and not retenus:
-        dernier = max(commits, key=lambda c: c["ciso"])
-        print(f"diagnostic : {len(commits)} commits sur la branche, le plus récent atterri le {dernier['ciso'][:16]} "
+        dernier = max(commits, key=lambda c: c["land"])
+        print(f"diagnostic : {len(commits)} commits sur la branche, le plus récent atterri le {dernier['land'][:16]} "
               f"(auteur {dernier['author']}, {dernier['short']}) — borne demandée : {limit.isoformat(timespec='minutes') if limit else 'aucune'}"
               + (f" → {plafond.isoformat(timespec='minutes')}" if plafond else ""))
-    return sorted(retenus, key=lambda c: c["ciso"])
+    return sorted(retenus, key=lambda c: (c["land"], c["iso"]))  # même atterrissage : ordre de travail
 
 
 def commits_diff(src: Source, commits: list[dict]) -> tuple[str, str, bool]:
@@ -766,7 +786,7 @@ def backfill(sources: list[Source], mode: str, since: str, repo: str, branch: st
     for key, group in groups.items():
         label = f"{group[0]['date']} · {group[0]['short']}" if mode == "per-commit" \
             else f"journée du {key[8:10]}/{key[5:7]}/{key[:4]}"
-        run_one(src, branch, label, sorted(group, key=lambda c: c["ciso"], reverse=True), md, retro=True)
+        run_one(src, branch, label, sorted(group, key=lambda c: (c["land"], c["iso"]), reverse=True), md, retro=True)
         state.update(src.full_name, branch, head, [c["sha"] for c in group])  # progressif : survit à un timeout
         state.save()
         md.save()
