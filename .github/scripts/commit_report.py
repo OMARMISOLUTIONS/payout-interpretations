@@ -180,7 +180,7 @@ def discover() -> list[Source]:
     return list(found.values())
 
 
-LOG_FMT = "%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%b%x1e"
+LOG_FMT = "%H%x1f%h%x1f%an%x1f%ad%x1f%cI%x1f%s%x1f%b%x1e"   # %ad = date d'auteur (travail), %cI = date de committer (atterrissage)
 IA_RE = re.compile(r"co-authored-by:[^\n]*(claude|copilot|cursor|aider|gpt|codex|gemini|devin)|generated with (claude|copilot|cursor|aider|chatgpt|codex|gemini|ai\b)|🤖|claude code|written by ai", re.I)
 
 
@@ -220,9 +220,9 @@ def parse_log(out: str) -> list[dict]:
     for rec in out.split("\x1e"):
         if not rec.strip():
             continue
-        h, short, author, iso, subject, body = (rec.strip("\n").split("\x1f") + [""] * 6)[:6]
+        h, short, author, iso, ciso, subject, body = (rec.strip("\n").split("\x1f") + [""] * 7)[:7]
         day, hm = iso[:10], iso[11:16]
-        items.append(dict(sha=h, short=short, author=author, iso=iso, day=day,
+        items.append(dict(sha=h, short=short, author=author, iso=iso, ciso=ciso or iso, day=day, cday=(ciso or iso)[:10],
                           date=f"{day[8:10]}/{day[5:7]} {hm}", subject=subject.strip(), body=body.strip()))
     return items
 
@@ -240,17 +240,22 @@ def threshold(since: str) -> datetime | None:
 
 
 def commits_since(src: Source, head: str, since: str) -> list[dict]:
-    """Commits joignables depuis head dont la date d'auteur ≥ borne (et < borne haute si since = "A..B"),
-    du plus ancien au plus récent. Filtré en Python : `git --since` coupe le parcours au premier commit trop
-    vieux (rebase, commit antidaté)."""
+    """Commits joignables depuis head ATTERRIS dans la période (date de committer ≥ borne, et < borne haute si
+    since = "A..B"), du plus ancien au plus récent. Date de committer et non d'auteur : un commit rebasé ou mergé
+    garde une date d'auteur ancienne. Filtré en Python : `git --since` coupe le parcours au premier commit trop
+    vieux. En cas de résultat vide, le log explique pourquoi."""
     commits = parse_log(src.git("log", "--no-merges", f"--format={LOG_FMT}", "--date=iso-strict", head))
     bas, _, haut = (since or "").partition("..")
     limit, plafond = threshold(bas), (threshold(haut) if haut else None)
-    if limit is not None:
-        commits = [c for c in commits if datetime.fromisoformat(c["iso"]) >= limit]
-    if plafond is not None:
-        commits = [c for c in commits if datetime.fromisoformat(c["iso"]) < plafond]
-    return sorted(commits, key=lambda c: c["iso"])
+    retenus = [c for c in commits
+               if (limit is None or datetime.fromisoformat(c["ciso"]) >= limit)
+               and (plafond is None or datetime.fromisoformat(c["ciso"]) < plafond)]
+    if commits and not retenus:
+        dernier = max(commits, key=lambda c: c["ciso"])
+        print(f"diagnostic : {len(commits)} commits sur la branche, le plus récent atterri le {dernier['ciso'][:16]} "
+              f"(auteur {dernier['author']}, {dernier['short']}) — borne demandée : {limit.isoformat(timespec='minutes') if limit else 'aucune'}"
+              + (f" → {plafond.isoformat(timespec='minutes')}" if plafond else ""))
+    return sorted(retenus, key=lambda c: c["ciso"])
 
 
 def commits_diff(src: Source, commits: list[dict]) -> tuple[str, str, bool]:
@@ -756,12 +761,12 @@ def backfill(sources: list[Source], mode: str, since: str, repo: str, branch: st
         return 0
     groups: "OrderedDict[str, list[dict]]" = OrderedDict()
     for c in commits:
-        groups.setdefault(c["sha"] if mode == "per-commit" else c["day"], []).append(c)
+        groups.setdefault(c["sha"] if mode == "per-commit" else c["cday"], []).append(c)
     print(f"Backfill {mode} sur {src.full_name}/{branch} : {len(commits)} commits, {len(groups)} rapport(s).")
     for key, group in groups.items():
         label = f"{group[0]['date']} · {group[0]['short']}" if mode == "per-commit" \
             else f"journée du {key[8:10]}/{key[5:7]}/{key[:4]}"
-        run_one(src, branch, label, sorted(group, key=lambda c: c["iso"], reverse=True), md, retro=True)
+        run_one(src, branch, label, sorted(group, key=lambda c: c["ciso"], reverse=True), md, retro=True)
         state.update(src.full_name, branch, head, [c["sha"] for c in group])  # progressif : survit à un timeout
         state.save()
         md.save()
