@@ -2,7 +2,10 @@ name: Commit report (privé)
 
 on:
   schedule:
-    - cron: "7 6-20/2 * * 1-5"   # toutes les 2 h, 6h–20h UTC, du lundi au vendredi ; "7 * * * *" = chaque heure
+    - cron: "7 6-20/2 * * 1-5"   # rapports : toutes les 2 h, 6h–20h UTC, du lundi au vendredi
+    - cron: "0 6 * * 1"          # récap hebdo : lundi 06:00 UTC (08:00 Paris), semaine précédente
+    - cron: "0 6 1 * *"          # récap mensuel : le 1er à 06:00 UTC, mois précédent
+    # ⚠ ces deux chaînes sont reconnues telles quelles par commit_report.py (main) : les modifier aux deux endroits
   workflow_dispatch:
     inputs:
       backfill:
@@ -22,6 +25,11 @@ on:
         description: "Backfill — profondeur : all, 30d, ou date YYYY-MM-DD"
         required: false
         default: "all"
+      recap:
+        description: "Récapitulatif : week = semaine précédente, month = mois précédent (prioritaire sur backfill)"
+        type: choice
+        options: [none, week, month]
+        default: none
       slack:
         description: "Poster sur Slack (décocher = seulement l'artefact Markdown)"
         type: boolean
@@ -41,6 +49,7 @@ concurrency:
 
 env:
   SOURCE_REPOS: "PAYOUT-fr/payoutWebsite,PAYOUT-fr/payoutUI"   # dépôts surveillés. Vider ("") = tous les dépôts visibles par les tokens
+  DEEP_DIVE_REPOS: "PAYOUT-fr/payoutUI"   # investigation du code avant rapport ("all" = tous, "" = aucun)
   SOURCE_OWNERS: ""          # vide = tous les dépôts visibles par les tokens ; sinon ex. "PAYOUT-fr,OMARMISOLUTIONS"
   SOURCE_EXCLUDE: ""         # ex. "PAYOUT-fr/archives,PAYOUT-fr/sandbox"
 
@@ -68,7 +77,10 @@ jobs:
           SLACK_WEBHOOK_URL__PAYOUT_FR_PAYOUTUI: ${{ secrets.WEBHOOK_URL_PAYOUTUI }}   # canal dédié payoutUI
           # SLACK_WEBHOOK_URL__OMARMISOLUTIONS_PAYOUTWEBSITE: ${{ secrets.WEBHOOK_URL_PAYOUTWEBSITE }}
           REPORT_MODEL: ${{ inputs.model || 'claude-sonnet-5' }}
+          REPORT_EFFORT: medium   # profondeur de réflexion (low / medium / high) ; high = plus cher et plus lent
           BACKFILL: ${{ inputs.backfill || 'off' }}
+          RECAP: ${{ inputs.recap != 'none' && inputs.recap || '' }}
+          SCHEDULE: ${{ github.event.schedule }}
           REPO_INPUT: ${{ inputs.repo }}
           BRANCH_INPUT: ${{ inputs.branch }}
           SINCE: ${{ inputs.since }}
@@ -80,7 +92,7 @@ jobs:
         run: |
           git config user.name "commit-report"
           git config user.email "commit-report@users.noreply.github.com"
-          git add state/last-seen.json 2>/dev/null || true
+          git add state 2>/dev/null || true
           git diff --cached --quiet || (git commit -qm "state: $(date -u +%Y-%m-%dT%H:%MZ)" && git push)
 
       - name: Artefact Markdown (tous les rapports du run)

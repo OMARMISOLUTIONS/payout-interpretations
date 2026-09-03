@@ -24,6 +24,11 @@ import sys
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+    TZ = ZoneInfo("Europe/Paris")
+except Exception:  # tzdata absente : on retombe sur UTC
+    TZ = timezone.utc
 
 MODEL = os.environ.get("REPORT_MODEL") or "claude-sonnet-5"
 MAX_DIFF_CHARS = int(os.environ.get("MAX_DIFF_CHARS", "150000"))
@@ -31,6 +36,14 @@ MAX_COMMITS = int(os.environ.get("MAX_COMMITS", "40"))
 STATE_FILE = os.environ.get("STATE_FILE", "state/last-seen.json")
 FIRST_RUN_WINDOW = os.environ.get("FIRST_RUN_WINDOW", "24h")
 BASE_URL = os.environ.get("SOURCE_BASE_URL", "https://github.com/")
+DEEP_DIVE = {r.strip().lower() for r in (os.environ.get("DEEP_DIVE_REPOS") or "").split(",") if r.strip()}
+MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "15"))
+EFFORT = os.environ.get("REPORT_EFFORT", "medium")   # profondeur de réflexion du modèle (low/medium/high)
+BUDGETS = (12000, 24000)                             # max_tokens = réflexion + texte ; second essai si tronqué
+TRONQUE = "\n\n_(rapport tronqué : budget de sortie atteint malgré deux essais — voir le log du run)_"
+SECTIONS_ATTENDUES = ("*Résumé opérationnel*", "*Interprétation*")
+REPORTS_LOG = os.environ.get("REPORTS_LOG", "state/reports.jsonl")   # une ligne par rapport produit (fiche incluse)
+SESSION_GAP_H, SESSION_START_H = 2.0, 1.0   # heuristique heures-sessions (git-hours)
 WORK = "source"
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 POST_SLACK = (os.environ.get("POST_SLACK") or "true").lower() != "false"
@@ -81,6 +94,7 @@ class Source:
     def __init__(self, full_name: str, token: str) -> None:
         self.full_name, self.token = full_name, token
         self.dir = os.path.join(WORK, full_name.replace("/", "__"))
+        self.deep = "all" in DEEP_DIVE or full_name.lower() in DEEP_DIVE
 
     @property
     def name(self) -> str:
@@ -98,7 +112,8 @@ class Source:
         url = f"{BASE_URL}{self.full_name}.git"
         env = dict(os.environ, SOURCE_CRED=self.token, GIT_TERMINAL_PROMPT="0")
         base = ["git", "-c", f"credential.helper={CRED_HELPER}", "clone", "--quiet", "--no-checkout"]
-        for extra in (["--filter=blob:none"], []):  # clone sans blobs (rapide) ; repli en clone complet
+        filtres = ([],) if self.deep else (["--filter=blob:none"], [])  # investigation : clone complet d'office
+        for extra in filtres:
             shutil.rmtree(self.dir, ignore_errors=True)
             r = subprocess.run(base + extra + [url, self.dir], capture_output=True, text=True, env=env)
             if r.returncode == 0:
@@ -111,6 +126,10 @@ class Source:
 
     def is_ancestor(self, a: str, b: str) -> bool:
         return subprocess.run(["git", "-C", self.dir, "merge-base", "--is-ancestor", a, b], capture_output=True).returncode == 0
+
+    def checkout(self, sha: str) -> None:
+        """Matérialise l'arbre au commit rapporté (pour les outils d'investigation)."""
+        self.git("checkout", "--quiet", "--force", sha)
 
     def branches(self) -> list[str]:
         out = self.git("branch", "-r", "--format=%(refname:short)")
@@ -162,6 +181,38 @@ def discover() -> list[Source]:
 
 
 LOG_FMT = "%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%b%x1e"
+IA_RE = re.compile(r"co-authored-by:[^\n]*(claude|copilot|cursor|aider|gpt|codex|gemini|devin)|generated with (claude|copilot|cursor|aider|chatgpt|codex|gemini|ai\b)|🤖|claude code|written by ai", re.I)
+
+
+def marqueur_ia(c: dict) -> str:
+    m = IA_RE.search(c["subject"] + "\n" + c["body"])
+    return m.group(0).strip()[:60] if m else ""
+
+
+def humanise(sec: float) -> str:
+    if sec < 3600:
+        return f"{int(sec // 60)} min"
+    if sec < 86400:
+        return f"{sec / 3600:.1f} h".replace(".0 h", " h")
+    return f"{sec / 86400:.1f} j".replace(".0 j", " j")
+
+
+def ecarts_auteur(src: Source, head: str, commits: list[dict]) -> dict:
+    """sha → écart avec le commit précédent du même auteur dans l'historique (borne haute du temps passé)."""
+    tous = parse_log(src.git("log", "--no-merges", f"--format={LOG_FMT}", "--date=iso-strict", head))
+    precedent: dict[str, str] = {}
+    dern: dict[str, str] = {}
+    for c in reversed(tous):  # du plus ancien au plus récent
+        if c["author"] in dern:
+            precedent[c["sha"]] = dern[c["author"]]
+        dern[c["author"]] = c["iso"]
+    out = {}
+    for c in commits:
+        if c["sha"] in precedent:
+            delta = (datetime.fromisoformat(c["iso"]) - datetime.fromisoformat(precedent[c["sha"]])).total_seconds()
+            if delta > 0:
+                out[c["sha"]] = humanise(delta)
+    return out
 
 
 def parse_log(out: str) -> list[dict]:
@@ -214,11 +265,18 @@ def commits_diff(src: Source, commits: list[dict]) -> tuple[str, str, bool]:
 
 
 # ----------------------------------------------------------------------------- modèle
-def build_prompt(src: Source, branch: str, label: str, commits: list[dict], stat: str, diff: str, truncated: bool) -> str:
+def build_prompt(src: Source, branch: str, label: str, commits: list[dict], stat: str, diff: str, truncated: bool,
+                 head: str = "") -> str:
+    ecarts = ecarts_auteur(src, head or commits[0]["sha"], commits)
     lines = [f"Dépôt : {src.full_name} — branche : {branch} — plage : {label}",
-             f"Commits ({len(commits)}, du plus récent au plus ancien) :"]
+             f"Commits ({len(commits)}, du plus récent au plus ancien) — métadonnées factuelles incluses :"]
     for c in commits:
-        lines.append(f"- {c['short']} · {c['author']} · {c['date']} · {c['subject']}")
+        meta = []
+        if marqueur_ia(c):
+            meta.append(f"MARQUEUR IA : « {marqueur_ia(c)} »")
+        if c["sha"] in ecarts:
+            meta.append(f"écart depuis le commit précédent de l'auteur : {ecarts[c['sha']]}")
+        lines.append(f"- {c['short']} · {c['author']} · {c['date']} · {c['subject']}" + (f"  [{' · '.join(meta)}]" if meta else ""))
         if c["body"]:
             lines.append("    " + c["body"].replace("\n", "\n    "))
     lines += ["", "Fichiers modifiés :", stat.strip() or "(aucun fichier texte modifié)", "",
@@ -240,9 +298,119 @@ def summarize(prompt: str, system: str) -> str:
         return "*Résumé opérationnel*\n• (dry run — aucun appel au modèle)"
     import anthropic  # importé ici pour que DRY_RUN fonctionne sans SDK
     client = anthropic.Anthropic()
-    msg = client.messages.create(model=MODEL, max_tokens=2000, system=system,
-                                 messages=[{"role": "user", "content": prompt}])
-    return "".join(getattr(b, "text", "") for b in msg.content).strip()
+    text = ""
+    for max_tok in BUDGETS:
+        msg = client.messages.create(model=MODEL, max_tokens=max_tok, system=system,
+                                     output_config={"effort": EFFORT},
+                                     messages=[{"role": "user", "content": prompt}])
+        text = "".join(getattr(b, "text", "") for b in msg.content).strip()
+        out = getattr(getattr(msg, "usage", None), "output_tokens", "?")
+        print(f"modèle : stop_reason={msg.stop_reason} · effort={EFFORT} · max_tokens={max_tok} · sortie={out} tokens · texte={len(text)} caractères")
+        if msg.stop_reason != "max_tokens" and text:
+            return verifier_structure(text)
+    if not text:
+        return ("*Interprétation indisponible* — le modèle n'a renvoyé aucun texte "
+                "(budget consommé par la réflexion interne ; voir le log du run).")
+    print("::warning::rapport tronqué malgré deux essais — posté avec mention")
+    return verifier_structure(text) + TRONQUE
+
+
+def verifier_structure(text: str) -> str:
+    manquantes = [sec for sec in SECTIONS_ATTENDUES if sec not in text]
+    if manquantes:
+        print(f"::warning::sections absentes du rapport : {', '.join(manquantes)}")
+    return text
+
+
+# ----------------------------------------------------------------------------- investigation (tool use)
+DEEP_INSTR = """
+
+Tu disposes d'outils de lecture du dépôt, figé au commit rapporté. AVANT d'écrire le rapport : vérifie dans le code
+chacun de tes points d'attention et tout doute levé par le diff (valeur codée en dur ? config existante ? autre module
+qui fait déjà X ? tests présents ?). Une question à laquelle le code répond n'est PAS un point d'attention : mets la
+réponse dans la section concernée, fichier à l'appui. Ne laisse en *Points d'attention* que ce qui exige une décision
+humaine ou une information absente du dépôt. Maximum {n} lectures — cible-les.""".format(n=MAX_TOOL_CALLS)
+
+TOOLS = [
+    {"name": "lister", "description": "Liste le contenu d'un répertoire du dépôt (les répertoires se terminent par /).",
+     "input_schema": {"type": "object", "properties": {"chemin": {"type": "string", "description": "Chemin relatif, '' ou '.' pour la racine"}}, "required": []}},
+    {"name": "chercher", "description": "Recherche un motif (regex git grep) dans les fichiers suivis du dépôt. Retourne fichier:ligne:extrait.",
+     "input_schema": {"type": "object", "properties": {"motif": {"type": "string"}, "chemin": {"type": "string", "description": "Limiter à un sous-répertoire ou motif de chemin (optionnel)"}}, "required": ["motif"]}},
+    {"name": "lire_fichier", "description": "Lit un fichier du dépôt (lignes numérotées). Par défaut les 200 premières lignes.",
+     "input_schema": {"type": "object", "properties": {"chemin": {"type": "string"}, "ligne_debut": {"type": "integer"}, "ligne_fin": {"type": "integer"}}, "required": ["chemin"]}},
+]
+
+
+def _safe_path(src: Source, chemin: str) -> str:
+    racine = os.path.realpath(src.dir)
+    p = os.path.realpath(os.path.join(racine, (chemin or ".").lstrip("/")))
+    if p != racine and not p.startswith(racine + os.sep) or f"{os.sep}.git" in p[len(racine):]:
+        raise ValueError(f"chemin hors dépôt : {chemin}")
+    return p
+
+
+def run_tool(src: Source, name: str, args: dict) -> str:
+    try:
+        if name == "lister":
+            p = _safe_path(src, args.get("chemin", ""))
+            entries = sorted(os.listdir(p))[:200]
+            return "\n".join(e + ("/" if os.path.isdir(os.path.join(p, e)) else "") for e in entries if e != ".git") or "(vide)"
+        if name == "chercher":
+            cmd = ["grep", "-nI", "--max-count", "5", "-e", str(args["motif"])]
+            if args.get("chemin"):
+                cmd += ["--", str(args["chemin"])]
+            out = src.git(*cmd, check=False)
+            return "\n".join(out.splitlines()[:80])[:8000] or "(aucun résultat)"
+        if name == "lire_fichier":
+            p = _safe_path(src, args["chemin"])
+            d, f = int(args.get("ligne_debut", 1)), int(args.get("ligne_fin", 0)) or int(args.get("ligne_debut", 1)) + 199
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+            sel = [f"{i}\t{l.rstrip()}" for i, l in enumerate(lines[d - 1:f], start=d)]
+            return ("\n".join(sel))[:12000] or "(vide)"
+        return f"outil inconnu : {name}"
+    except Exception as exc:
+        return f"erreur : {exc}"
+
+
+def deep_summarize(src: Source, head_sha: str, prompt: str, system: str) -> str:
+    if DRY_RUN:
+        return "*Résumé opérationnel*\n• (dry run — aucun appel au modèle)"
+    import anthropic
+    client = anthropic.Anthropic()
+    src.checkout(head_sha)
+    messages = [{"role": "user", "content": prompt}]
+    calls = 0
+    for _tour in range(MAX_TOOL_CALLS + 3):  # plafond dur d'allers-retours, quoi que fasse le modèle
+        msg = client.messages.create(model=MODEL, max_tokens=BUDGETS[0], system=system + DEEP_INSTR,
+                                     output_config={"effort": EFFORT}, tools=TOOLS, messages=messages)
+        if msg.stop_reason == "tool_use" and calls < MAX_TOOL_CALLS:
+            messages.append({"role": "assistant", "content": msg.content})
+            results = []
+            for block in msg.content:
+                if getattr(block, "type", "") == "tool_use":
+                    calls += 1
+                    print(f"investigation : {block.name} {json.dumps(block.input, ensure_ascii=False)[:120]}")
+                    results.append({"type": "tool_result", "tool_use_id": block.id,
+                                    "content": run_tool(src, block.name, dict(block.input))})
+            messages.append({"role": "user", "content": results})
+            continue
+        text = "".join(getattr(b, "text", "") for b in msg.content).strip()
+        print(f"modèle (investigation) : stop_reason={msg.stop_reason} · effort={EFFORT} · {calls} lecture(s) · texte={len(text)} caractères")
+        if text and msg.stop_reason == "max_tokens":
+            print("::warning::rapport (investigation) tronqué — posté avec mention")
+            return verifier_structure(text) + TRONQUE
+        if text:
+            return verifier_structure(text)
+        if msg.stop_reason == "tool_use":  # plafond de lectures atteint sans texte : on force la rédaction
+            messages.append({"role": "assistant", "content": msg.content})
+            messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": b.id,
+                             "content": "Plafond de lectures atteint — rédige le rapport maintenant."}
+                             for b in msg.content if getattr(b, "type", "") == "tool_use"]})
+            continue
+        return ("*Interprétation indisponible* — le modèle n'a renvoyé aucun texte (voir le log du run).")
+    print("::warning::investigation : plafond d'allers-retours atteint sans rapport — repli sur le mode simple")
+    return summarize(prompt, system)
 
 
 # ----------------------------------------------------------------------------- sorties
@@ -364,10 +532,180 @@ def run_one(src: Source, branch: str, label: str, commits: list[dict], md: Markd
     prompt = build_prompt(src, branch, label, commits, stat, diff, truncated)
     if DRY_RUN:
         print("=== PROMPT ===\n" + prompt[:800] + ("\n[...]" if len(prompt) > 800 else ""))
-    report = summarize(prompt, system_for(src))
+    report = (deep_summarize(src, commits[0]["sha"], prompt, system_for(src)) if src.deep
+              else summarize(prompt, system_for(src)))
     post_slack(src, slack_payload(src, branch, label, commits, report, len(diff), truncated, retro))
     md.add(src, branch, label, commits, report)
+    log_report(src, branch, label, commits, report)
     print(f"Rapport : {src.full_name} · {branch} · {label} — {len(commits)} commit(s), diff {len(diff)} caractères.")
+
+
+def extraire_fiche(report: str) -> str:
+    m = re.search(r"\*Fiche\*\s*\n(.*?)(?=\n\*[^*\n]+\*\s*\n|\Z)", report, re.S)
+    return m.group(1).strip() if m else ""
+
+
+def log_report(src: Source, branch: str, label: str, commits: list[dict], report: str) -> None:
+    os.makedirs(os.path.dirname(REPORTS_LOG) or ".", exist_ok=True)
+    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "repo": src.full_name, "branch": branch,
+           "label": label, "shas": [c["sha"] for c in commits], "dates": [c["iso"] for c in commits],
+           "authors": sorted({c["author"] for c in commits}), "ia": sum(1 for c in commits if marqueur_ia(c)),
+           "fiche": extraire_fiche(report)}
+    with open(REPORTS_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+# ----------------------------------------------------------------------------- récapitulatif hebdo / mensuel
+def periode(kind: str, now: datetime | None = None) -> tuple[datetime, datetime, str]:
+    """Période complète précédente : semaine ISO (lun→dim) ou mois civil. Retourne (début, fin exclue, libellé)."""
+    now = (now or datetime.now(timezone.utc)).astimezone(TZ)
+    if kind == "month":
+        fin = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        debut = (fin - timedelta(days=1)).replace(day=1)
+        return debut, fin, f"mois de {debut.strftime('%m/%Y')}"
+    fin = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    debut = fin - timedelta(days=7)
+    return debut, fin, f"semaine {debut.isocalendar()[1]} ({debut.strftime('%d/%m')} → {(fin - timedelta(days=1)).strftime('%d/%m')})"
+
+
+def heures_sessions(isos: list[str]) -> float:
+    ts = sorted(datetime.fromisoformat(i) for i in isos)
+    total, prev = 0.0, None
+    for t in ts:
+        if prev is not None and (t - prev).total_seconds() <= SESSION_GAP_H * 3600:
+            total += (t - prev).total_seconds() / 3600
+        else:
+            total += SESSION_START_H
+        prev = t
+    return round(total, 1)
+
+
+def hors_ouvrees(t: datetime) -> bool:
+    """Week-end, ou nuit (22h–6h) en heure de Paris."""
+    l = t.astimezone(TZ)
+    return l.weekday() >= 5 or l.hour >= 22 or l.hour < 6
+
+
+def stats_periode(src: Source, debut: datetime, fin: datetime) -> dict:
+    """Compteurs factuels sur toutes les branches : par auteur, commits / +lignes / −lignes / heures-sessions /
+    jours actifs / commits hors heures ouvrées / marqués IA. Deux temps : la liste (sans blobs) puis le numstat
+    des seuls commits de la période — un clone sans blobs ne télécharge ainsi que ce qui est nécessaire."""
+    commits = parse_log(src.git("log", "--remotes=origin", "--no-merges", f"--format={LOG_FMT}", "--date=iso-strict"))
+    par_auteur: dict[str, dict] = {}
+    for c in commits:
+        try:
+            t = datetime.fromisoformat(c["iso"])
+        except ValueError:
+            continue
+        if not (debut <= t < fin):
+            continue
+        add = dele = 0
+        for l in src.git("show", "--numstat", "--format=", c["sha"], check=False).splitlines():
+            m = re.match(r"^(\d+|-)\t(\d+|-)\t", l)
+            if m:
+                add += int(m.group(1)) if m.group(1).isdigit() else 0
+                dele += int(m.group(2)) if m.group(2).isdigit() else 0
+        a = par_auteur.setdefault(c["author"], {"commits": 0, "add": 0, "del": 0, "isos": [], "ia": 0, "hors": 0, "jours": set()})
+        a["commits"] += 1; a["add"] += add; a["del"] += dele; a["isos"].append(c["iso"])
+        a["ia"] += 1 if marqueur_ia(c) else 0
+        a["hors"] += 1 if hors_ouvrees(t) else 0
+        a["jours"].add(t.astimezone(TZ).date())
+    for a in par_auteur.values():
+        a["heures"] = heures_sessions(a["isos"])
+        a["jours"] = len(a["jours"])
+    return par_auteur
+
+
+def tableau(stats: dict[str, dict[str, dict]]) -> str:
+    en_tete = f"{'dépôt':<15}{'auteur':<13}{'commits':>8}{'+lignes':>8}{'−lignes':>8}{'h-sess':>7}{'j.act':>6}{'hors-h':>7}{'IA':>4}"
+    lignes = [en_tete]
+    fusion: dict[str, dict] = {}
+    for repo, auteurs in stats.items():
+        for auteur, a in sorted(auteurs.items(), key=lambda kv: -kv[1]["commits"]):
+            lignes.append(f"{repo.split('/')[-1][:14]:<15}{auteur[:12]:<13}{a['commits']:>8}{a['add']:>8}{a['del']:>8}"
+                          f"{a['heures']:>7}{a['jours']:>6}{a['hors']:>7}{a['ia']:>4}")
+            f = fusion.setdefault(auteur, {"commits": 0, "add": 0, "del": 0, "isos": [], "hors": 0, "ia": 0, "jours": set()})
+            for k in ("commits", "add", "del", "hors", "ia"):
+                f[k] += a[k]
+            f["isos"] += a["isos"]
+            f["jours"].update(datetime.fromisoformat(i).astimezone(TZ).date() for i in a["isos"])
+    if len(stats) > 1:
+        lignes.append("— par auteur, tous dépôts (sessions fusionnées, sans double compte) —")
+        for auteur, f in sorted(fusion.items(), key=lambda kv: -kv[1]["commits"]):
+            lignes.append(f"{'':<15}{auteur[:12]:<13}{f['commits']:>8}{f['add']:>8}{f['del']:>8}"
+                          f"{heures_sessions(f['isos']):>7}{len(f['jours']):>6}{f['hors']:>7}{f['ia']:>4}")
+    tot_h = round(sum(heures_sessions(f["isos"]) for f in fusion.values()), 1)
+    lignes.append(f"{'TOTAL':<28}{sum(f['commits'] for f in fusion.values()):>8}{sum(f['add'] for f in fusion.values()):>8}"
+                  f"{sum(f['del'] for f in fusion.values()):>8}{tot_h:>7}{'':>6}{sum(f['hors'] for f in fusion.values()):>7}{sum(f['ia'] for f in fusion.values()):>4}")
+    return "\n".join(lignes)
+
+
+RECAP_SYSTEM = """Tu rédiges pour le dirigeant de Payout (expert-comptable, à l'aise techniquement) le récapitulatif {kind} \
+de l'activité de développement, en français, à partir : (1) de COMPTEURS FACTUELS déjà calculés — ne les recalcule \
+pas, ne les contredis pas ; « h-sess » = heures-sessions, ESTIMATION heuristique du temps actif (méthode git-hours : commits espacés de \
+moins de 2 h comptés en continu, +1 h forfaitaire par session — ni plancher ni plafond, un ordre de grandeur) ; \
+« j.act » = jours avec au moins un commit ; « hors-h » = commits le week-end ou entre 22h et 6h (Paris) ; (2) des FICHES des rapports de la période (nature, \
+origine IA, effort estimé) ; (3) des compteurs de la période précédente pour la tendance.
+Format Slack mrkdwn (gras *texte*, puces •), 2 500 caractères max, rien d'inventé. Structure :
+*Lecture de la période*
+• 3 puces max : ce qui ressort (rythme, répartition, faits marquants)
+*Heures*
+• heures-sessions vs effort estimé cumulé des fiches : convergence ou écart, et ce qu'on peut en conclure ; \
+hypothèses explicites ; jamais présenté comme un pointage
+*Livré / en cours*
+• par feature (nom), d'après les fiches : livré, en cours, abandonné
+*Signal IA*
+• part de commits marqués IA, tendance, effet visible sur le rythme ou la qualité (prudence)
+*Vigilance*
+• rythme (nuits, week-ends, pics), gros commits monolithiques, absence de tests, dépôts silencieux
+"""
+
+
+def recap(sources: list[Source], kind: str, md: Markdown) -> int:
+    debut, fin, libelle = periode(kind)
+    p_debut, p_fin = debut - (fin - debut), debut
+    stats, prev = {}, {}
+    for src in sources:
+        if not src.clone():
+            continue
+        cur = stats_periode(src, debut, fin)
+        if cur:
+            stats[src.full_name] = cur
+        old = stats_periode(src, p_debut, p_fin)
+        if old:
+            prev[src.full_name] = old
+    fiches = []
+    if os.path.exists(REPORTS_LOG):
+        with open(REPORTS_LOG, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if any(debut <= datetime.fromisoformat(d) < fin for d in r.get("dates", [])) and r.get("fiche"):
+                    fiches.append(f"[{r['repo'].split('/')[-1]} · {r['branch']} · {r['label']} · {', '.join(r['authors'])}]\n{r['fiche']}")
+    if not stats and not fiches:
+        print(f"Récap {kind} : aucune activité sur la {libelle}.")
+        return 0
+    table_cur, table_prev = tableau(stats) if stats else "(aucun commit)", tableau(prev) if prev else "(aucun commit)"
+    titre = f"📊 Récap {'mensuel' if kind == 'month' else 'hebdo'} · {libelle}"
+    prompt = (f"{titre}\n\nCOMPTEURS DE LA PÉRIODE :\n{table_cur}\n\nPÉRIODE PRÉCÉDENTE (tendance) :\n{table_prev}\n\n"
+              f"FICHES DES RAPPORTS DE LA PÉRIODE ({len(fiches)}) :\n" + ("\n\n".join(fiches) if fiches else "(aucune fiche enregistrée)"))
+    texte = summarize(prompt, RECAP_SYSTEM.format(kind="mensuel" if kind == "month" else "hebdomadaire"))
+    blocks = [{"type": "header", "text": {"type": "plain_text", "text": titre[:150]}},
+              {"type": "section", "text": {"type": "mrkdwn", "text": "```\n" + table_cur[:2800] + "\n```"}}]
+    for part in chunks(texte):
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": part}})
+    blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"Modèle {MODEL} · {len(fiches)} fiche(s) · h-sess = estimation sessions (gap 2 h, +1 h/session) · hors-h = week-end ou 22h–6h"}]})
+    if not DRY_RUN and POST_SLACK:
+        import requests
+        for url in [u.strip() for u in os.environ.get("SLACK_WEBHOOK_URL", "").split(",") if u.strip()]:
+            r = requests.post(url, json={"text": titre, "blocks": blocks[:50]}, timeout=30)
+            if r.status_code != 200:
+                raise RuntimeError(f"Slack {r.status_code} : {r.text[:300]}")
+    md.parts.append(f"\n## {titre}\n\n```\n{table_cur}\n```\n\n{mrkdwn_to_md(texte)}\n")
+    print(f"Récap {kind} posté : {libelle} — {sum(a['commits'] for r in stats.values() for a in r.values())} commits, {len(fiches)} fiche(s).")
+    return 0
 
 
 # ----------------------------------------------------------------------------- modes
@@ -428,6 +766,15 @@ def main() -> int:
     md, state = Markdown(), State()
     sources = discover()
     print("Dépôts : " + (", ".join(s.full_name for s in sources) or "(aucun)"))
+    recap_kind = (os.environ.get("RECAP") or "").strip().lower()
+    sched = (os.environ.get("SCHEDULE") or "").strip()
+    if recap_kind not in ("week", "month"):
+        recap_kind = {"0 6 * * 1": "week", "0 6 1 * *": "month"}.get(sched, "")
+    if recap_kind:
+        code = recap(sources, recap_kind, md)
+        if len(md.parts) > 1:
+            print(f"Markdown : {md.save()}")
+        return code
     mode = (os.environ.get("BACKFILL") or "off").strip()
     if mode in ("per-day", "per-commit"):
         code = backfill(sources, mode, os.environ.get("SINCE", "all"), os.environ.get("REPO_INPUT") or "",

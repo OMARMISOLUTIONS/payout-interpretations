@@ -30,6 +30,28 @@ Jamais de token classic scope `repo` (lecture-écriture globale).
   URLs multiples par virgules ; dépôt sans webhook : pas de post, Markdown conservé.
 - Modèle : `claude-sonnet-5` par défaut, sélecteur par run (fable-5 ≈ ×5 le coût, haiku-4-5 ≈ ÷2).
 
+## Investigation (deep dive)
+`DEEP_DIVE_REPOS` (env du yml, actuellement `PAYOUT-fr/payoutUI` ; `all` = tous, vide = aucun) : avant d'écrire,
+le modèle dispose de trois outils lecture seule sur l'arbre du dépôt FIGÉ au commit rapporté (`lister`, `chercher`
+= git grep, `lire_fichier`), plafond `MAX_TOOL_CALLS` (15). Consigne : vérifier ses propres points d'attention dans
+le code — ce que le code résout passe dans les sections avec la réponse, seuls les vrais arbitrages humains restent
+en *Points d'attention*. Un dépôt en investigation est cloné COMPLET (pas de --filter). Coût ×3 à ×10 par rapport.
+Plafond dur de MAX_TOOL_CALLS+3 allers-retours puis repli sur le mode simple (pas de boucle possible).
+Génération : `max_tokens` 12 000 puis 24 000 si `stop_reason=max_tokens`, `output_config.effort` = REPORT_EFFORT
+(medium), mention _(rapport tronqué…)_ si encore coupé, avertissement si une section obligatoire manque.
+
+## Récapitulatifs hebdo / mensuel
+Crons dédiés `0 6 * * 1` (lundi, semaine ISO précédente) et `0 6 1 * *` (le 1er, mois précédent) ; manuel via input
+`recap` (week|month). Compteurs FACTUELS calculés par le script sur toutes les branches (`git log --remotes --numstat`,
+filtrage des dates en Python, périodes en heure de Paris, numstat demandé pour les seuls commits de la période) :
+par dépôt × auteur = commits, +lignes, −lignes, heures-sessions (heuristique git-hours : gap ≤ 2 h compté en continu,
++1 h par session — ESTIMATION du temps actif, ni plancher ni plafond), jours actifs, commits hors ouvrées (week-end
+ou 22h–6h Paris), commits marqués IA ; bloc « par auteur, tous dépôts » avec sessions fusionnées (pas de double
+compte dans le TOTAL) ; tableau de la période précédente pour la tendance. Le modèle rédige seulement la lecture (*Lecture de
+la période* / *Heures* / *Livré / en cours* / *Signal IA* / *Vigilance*) à partir de ces compteurs et des FICHES
+journalisées dans `state/reports.jsonl` (une ligne par rapport : repo, branche, SHA, dates, auteurs, fiche).
+Posté sur le canal par défaut (`WEBHOOK_URL`) + Markdown. Le run commite tout `state/`.
+
 ## Modes
 - Planifié : par dépôt/branche, commits depuis le dernier SHA vu ; premier passage ou branche réécrite → fenêtre
   `FIRST_RUN_WINDOW` (24h) ; dédup globale des SHA (merge preview→main non re-rapporté).

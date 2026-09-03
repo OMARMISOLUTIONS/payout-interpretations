@@ -47,6 +47,16 @@ Toujours valable pour des notifications brutes, indépendamment du dispositif ci
   réaffiché (remplaçable seulement) ; une clé Anthropic n'est montrée qu'à la création.
 - GitHub Desktop : les fichiers cachés (`.github`, `.gitignore`) sont bien commités même si l'explorateur les masque.
 
+## Compléments (suite de la journée)
+- Rapport vide sur Slack : `max_tokens=2000` consommé par la réflexion interne de Sonnet 5 → budget 8000 (retry
+  16000), diagnostic `stop_reason`/tokens dans le log, message explicite si texte vide.
+- Mode investigation (`DEEP_DIVE_REPOS`, actif sur payoutUI) : le modèle lit le dépôt figé au commit rapporté
+  (lister / chercher / lire_fichier, 15 lectures max) pour répondre lui-même aux points d'attention.
+- Fiche en tête de rapport (nature, origine IA sur marqueurs objectifs, effort estimé + écart réel entre commits).
+- Récap hebdo/mensuel (02/09) : compteurs factuels git (commits, lignes, heures-sessions, part IA) + lecture du
+  modèle à partir des fiches journalisées ; crons dédiés et input `recap`.
+- Journal détaillé des échanges : docs/CONVERSATION.md.
+
 ## État au 01/09/2026
 Dépôt `OMARMISOLUTIONS/payout-interpretations` (privé, hors org PAYOUT-fr). Surveillés : `PAYOUT-fr/payoutWebsite`
 (canal par défaut) et `PAYOUT-fr/payoutUI` (canal dédié, prompt IA enrichi). Cron `7 6-20/2 * * 1-5` (UTC).

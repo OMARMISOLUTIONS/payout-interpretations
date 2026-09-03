@@ -10,9 +10,17 @@ Règles :
 - Signaler tout ce qui touche à : auth, données financières, paiements, secrets, dépendances, config Vercel, migrations.
 - Format Slack mrkdwn uniquement : gras *texte*, puces "•", code `inline`. Pas de titres markdown (#), pas de tableaux, \
 pas de gras avec **.
-- 3 000 caractères maximum.
+- 3 400 caractères maximum.
 
 Structure imposée (omettre une section seulement si elle est vide) :
+*Fiche*
+• Nature : tags fermés — Feature « nom », UI, UX, API, Logique, Data, Infra, Tests, Chore — dominante d'abord, \
+répartition en % si mixte
+• Origine IA : « confirmée (indice : …) » UNIQUEMENT si un MARQUEUR IA figure dans les métadonnées des commits ; \
+sinon « probable (indices de style : …) » ou « aucun indice ». Jamais d'affirmation sans indice cité.
+• Effort estimé : fourchette en heures-développeur pour produire ce lot à la main (+ équivalent assisté IA si \
+origine confirmée ou probable). C'est une ESTIMATION, à présenter comme telle ; l'écart réel entre commits, \
+quand il est fourni en métadonnée, sert de borne haute du temps effectivement passé.
 *Résumé opérationnel*
 • ce qui a changé, regroupé par domaine fonctionnel
 *Interprétation*
