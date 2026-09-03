@@ -22,7 +22,7 @@ on:
         required: false
         default: "main"
       since:
-        description: "Backfill — profondeur : all, 30d, ou date YYYY-MM-DD"
+        description: "Backfill — profondeur : all, 30d, date YYYY-MM-DD, ou tranche A..B (ex. 2026-06-01..2026-07-01)"
         required: false
         default: "all"
       recap:
@@ -50,6 +50,7 @@ concurrency:
 env:
   SOURCE_REPOS: "PAYOUT-fr/payoutWebsite,PAYOUT-fr/payoutUI"   # dépôts surveillés. Vider ("") = tous les dépôts visibles par les tokens
   DEEP_DIVE_REPOS: "PAYOUT-fr/payoutUI"   # investigation du code avant rapport ("all" = tous, "" = aucun)
+  FIRST_RUN_WINDOW: 7d       # première rencontre d'une branche : on remonte 7 jours (24h par défaut sinon)
   SOURCE_OWNERS: ""          # vide = tous les dépôts visibles par les tokens ; sinon ex. "PAYOUT-fr,OMARMISOLUTIONS"
   SOURCE_EXCLUDE: ""         # ex. "PAYOUT-fr/archives,PAYOUT-fr/sandbox"
 

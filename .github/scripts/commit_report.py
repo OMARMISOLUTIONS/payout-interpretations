@@ -240,12 +240,16 @@ def threshold(since: str) -> datetime | None:
 
 
 def commits_since(src: Source, head: str, since: str) -> list[dict]:
-    """Commits joignables depuis head dont la date d'auteur ≥ borne, du plus ancien au plus récent.
-    Filtré en Python : `git --since` coupe le parcours au premier commit trop vieux (rebase, commit antidaté)."""
+    """Commits joignables depuis head dont la date d'auteur ≥ borne (et < borne haute si since = "A..B"),
+    du plus ancien au plus récent. Filtré en Python : `git --since` coupe le parcours au premier commit trop
+    vieux (rebase, commit antidaté)."""
     commits = parse_log(src.git("log", "--no-merges", f"--format={LOG_FMT}", "--date=iso-strict", head))
-    limit = threshold(since)
+    bas, _, haut = (since or "").partition("..")
+    limit, plafond = threshold(bas), (threshold(haut) if haut else None)
     if limit is not None:
         commits = [c for c in commits if datetime.fromisoformat(c["iso"]) >= limit]
+    if plafond is not None:
+        commits = [c for c in commits if datetime.fromisoformat(c["iso"]) < plafond]
     return sorted(commits, key=lambda c: c["iso"])
 
 
@@ -758,7 +762,9 @@ def backfill(sources: list[Source], mode: str, since: str, repo: str, branch: st
         label = f"{group[0]['date']} · {group[0]['short']}" if mode == "per-commit" \
             else f"journée du {key[8:10]}/{key[5:7]}/{key[:4]}"
         run_one(src, branch, label, sorted(group, key=lambda c: c["iso"], reverse=True), md, retro=True)
-    state.update(src.full_name, branch, head, [c["sha"] for c in commits])  # évite un doublon au prochain run
+        state.update(src.full_name, branch, head, [c["sha"] for c in group])  # progressif : survit à un timeout
+        state.save()
+        md.save()
     return 0
 
 
