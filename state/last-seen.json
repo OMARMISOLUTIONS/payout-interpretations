@@ -1,7 +1,7 @@
 {
  "repos": {
   "PAYOUT-fr/payoutWebsite": {
-   "main": "590667be063e4ffd233d8ddefc0c5ffc636d99cb",
+   "main": "93fd822c0ba05c71b05a0b73304fe27f760aadd0",
    "preview-homepage": "1cf3a5d14acf11a5b48741da1a30861fd5c2fc45"
   },
   "PAYOUT-fr/payoutUI": {
@@ -82,7 +82,13 @@
   "81f129032f80a802d032cb620352c8e01558120e",
   "e0c26449817be0b1218b6202ebf199b0777e9d08",
   "7339846b4d240aad1152b129154ead06f14fdf1c",
-  "41a4815db60e9ae1168afcb99be9624ec139ee11"
+  "41a4815db60e9ae1168afcb99be9624ec139ee11",
+  "93fd822c0ba05c71b05a0b73304fe27f760aadd0",
+  "8c1da620acd60a77e1cb7f9e85e532e437a75e58",
+  "660641a5c2f8fa7517a0381d0224d995cfe279ae",
+  "c01bf42131c9eb3249e4fa072581d914979c9c98",
+  "4fd6ef3f50797e335249aff6e809bca78b0b7ff7",
+  "0978b165fd9baa9ae88b9cfcefd1f787b22080ce"
  ],
- "updated": "2026-09-04T20:42:20+00:00"
+ "updated": "2026-09-07T12:20:12+00:00"
 }
