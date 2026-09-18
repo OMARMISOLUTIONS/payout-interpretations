@@ -5,7 +5,7 @@
    "preview-homepage": "1cf3a5d14acf11a5b48741da1a30861fd5c2fc45"
   },
   "PAYOUT-fr/payoutUI": {
-   "preview": "d0f6e8c764b028aa8900549844ce3f369a420c5b",
+   "preview": "05b25a2def89ed2926a7d4afd7d885d10adb6cd9",
    "main": "5be2c60d348109886e6cce5842818a9b1ca52760",
    "storybook/card": "7a3037517f67213a7ea1407ef7d5002408652e95",
    "storybook/dropdown": "a66069ebe945946036d1019e8ad286ab72471dc4",
@@ -126,7 +126,9 @@
   "e84ec3d7efd55072006baba9251946ac9eedde67",
   "bc6e0009436a4ea6e2623906e49d852c59051919",
   "885ca6d9302149b5213b4744c09a1db84784b259",
-  "4d26f8449f8cc8dcb2eda0aba4f9cf8bd9751a43"
+  "4d26f8449f8cc8dcb2eda0aba4f9cf8bd9751a43",
+  "dc0e61082b2332d0d01d26d2e3f5def87ed75144",
+  "aca809819a171648e815236662c61b1f65e0a40c"
  ],
- "updated": "2026-09-18T16:19:07+00:00"
+ "updated": "2026-09-18T20:50:43+00:00"
 }
